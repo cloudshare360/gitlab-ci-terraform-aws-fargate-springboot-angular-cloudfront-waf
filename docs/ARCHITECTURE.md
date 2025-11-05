@@ -1,9 +1,9 @@
 # GitLab CI/CD + Terraform + AWS + Spring Boot + Angular - Architecture Documentation
 
-> **📖 This is the GitHub Pages copy of the architecture documentation.**  
-> **Master copy:** [`/ARCHITECTURE.md`](../ARCHITECTURE.md) (repository root)  
-> **Live docs:** [GitHub Pages](https://cloudshare360.github.io/gitlab-ci-terraform-aws-fargate-springboot-angular-cloudfront-waf/)  
-> **Repository:** [GitHub Repo](https://github.com/cloudshare360/gitlab-ci-terraform-aws-fargate-springboot-angular-cloudfront-waf)
+> **📖 This is the GitLab Pages copy of the architecture documentation.**  
+> **Master copy:** [`/ARCHITECTURE.md`](https://gitlab.com/cloudshare360/gitlab-ci-terraform-aws-fargate-springboot-angular-cloudfront-waf/-/blob/main/ARCHITECTURE.md) (repository root)  
+> **Live docs:** [GitLab Pages](https://cloudshare360.gitlab.io/gitlab-ci-terraform-aws-fargate-springboot-angular-cloudfront-waf/)  
+> **Repository:** [GitLab Repo](https://gitlab.com/cloudshare360/gitlab-ci-terraform-aws-fargate-springboot-angular-cloudfront-waf)
 
 ---
 

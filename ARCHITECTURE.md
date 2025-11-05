@@ -1583,4 +1583,4 @@ graph TB
 **Version:** 1.0.0  
 **Maintainer:** DevOps Team
 
-> **📝 Edit this file:** This is the master copy. Changes are automatically synced to `docs/ARCHITECTURE.md` for GitHub Pages via GitHub Actions.
+> **📝 Edit this file:** This is the master copy. Changes are automatically synced to `docs/ARCHITECTURE.md` for GitLab Pages via the GitLab CI/CD pipeline.

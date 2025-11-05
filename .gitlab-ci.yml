@@ -1,0 +1,560 @@
+stages:
+  - validate
+  - build
+  - test
+  - security
+  - terraform-plan
+  - terraform-apply
+  - deploy-backend
+  - deploy-frontend
+  - post-deploy
+  - pages
+
+variables:
+  # Docker settings
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+  
+  # AWS settings
+  AWS_DEFAULT_REGION: $AWS_REGION
+  ECR_REGISTRY: $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+  BACKEND_IMAGE: $ECR_REGISTRY/fargate-springboot-api
+  FRONTEND_IMAGE: $ECR_REGISTRY/fargate-angular-frontend
+  
+  # Terraform settings
+  TF_ROOT: terraform
+  TF_VAR_aws_region: $AWS_REGION
+  TF_VAR_project_name: "fargate-springboot-angular"
+  TF_VAR_environment: $CI_ENVIRONMENT_NAME
+  TF_VAR_backend_image_uri: $BACKEND_IMAGE:$CI_COMMIT_SHA
+  TF_VAR_frontend_image_uri: $FRONTEND_IMAGE:$CI_COMMIT_SHA
+  TF_VAR_db_password: $DB_PASSWORD
+  TF_VAR_frontend_deployment_mode: $FRONTEND_DEPLOYMENT_MODE  # 'fargate' or 's3'
+  
+  # Deployment mode (default to fargate, can be overridden)
+  FRONTEND_DEPLOYMENT_MODE: "fargate"
+
+# Global before script
+before_script:
+  - echo "Pipeline started for commit $CI_COMMIT_SHA"
+  - echo "Environment: $CI_ENVIRONMENT_NAME"
+
+# ================================
+# VALIDATION STAGE
+# ================================
+
+validate-terraform:
+  stage: validate
+  image: hashicorp/terraform:1.6
+  script:
+    - cd $TF_ROOT
+    - terraform init -backend=false
+    - terraform validate
+    - terraform fmt -check=true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+validate-backend:
+  stage: validate
+  image: openjdk:21-jdk-slim
+  script:
+    - cd backend
+    - ./mvnw validate
+    - ./mvnw compile -DskipTests
+  cache:
+    paths:
+      - backend/.m2/repository/
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+validate-frontend:
+  stage: validate
+  image: node:18-alpine
+  script:
+    - cd frontend
+    - npm ci
+    - npm run ng -- version
+  cache:
+    paths:
+      - frontend/node_modules/
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ================================
+# BUILD STAGE
+# ================================
+
+build-backend:
+  stage: build
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  script:
+    - echo "Building backend application..."
+    - cd backend
+    - docker build -t $BACKEND_IMAGE:$CI_COMMIT_SHA .
+    - docker build -t $BACKEND_IMAGE:latest .
+    
+    # Login to ECR and push
+    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+    - docker push $BACKEND_IMAGE:$CI_COMMIT_SHA
+    - docker push $BACKEND_IMAGE:latest
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+build-frontend:
+  stage: build
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  script:
+    - echo "Building frontend application..."
+    - cd frontend
+    
+    # Build for Fargate deployment
+    - |
+      if [ "$FRONTEND_DEPLOYMENT_MODE" = "fargate" ]; then
+        echo "Building Docker image for Fargate deployment..."
+        docker build -t $FRONTEND_IMAGE:$CI_COMMIT_SHA .
+        docker build -t $FRONTEND_IMAGE:latest .
+        
+        # Login to ECR and push
+        aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+        docker push $FRONTEND_IMAGE:$CI_COMMIT_SHA
+        docker push $FRONTEND_IMAGE:latest
+      fi
+    
+    # Build for S3 deployment
+    - |
+      if [ "$FRONTEND_DEPLOYMENT_MODE" = "s3" ]; then
+        echo "Building static files for S3 deployment..."
+        npm ci
+        npm run build:prod
+        
+        # Create build artifact
+        tar -czf frontend-build.tar.gz -C dist/fargate-angular-frontend .
+      fi
+  artifacts:
+    paths:
+      - frontend/frontend-build.tar.gz
+    expire_in: 1 hour
+    when: on_success
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# ================================
+# TEST STAGE
+# ================================
+
+test-backend:
+  stage: test
+  image: openjdk:21-jdk-slim
+  script:
+    - cd backend
+    - ./mvnw test
+    - ./mvnw jacoco:report
+  artifacts:
+    reports:
+      junit:
+        - backend/target/surefire-reports/TEST-*.xml
+      coverage_report:
+        coverage_format: jacoco
+        path: backend/target/site/jacoco/jacoco.xml
+    paths:
+      - backend/target/site/jacoco/
+    expire_in: 1 week
+  coverage: '/Total.*?([0-9]{1,3})%/'
+  cache:
+    paths:
+      - backend/.m2/repository/
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+test-frontend:
+  stage: test
+  image: node:18-alpine
+  script:
+    - cd frontend
+    - npm ci
+    - npm run test -- --watch=false --browsers=ChromeHeadless --code-coverage
+  artifacts:
+    reports:
+      junit:
+        - frontend/coverage/test-results.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: frontend/coverage/cobertura-coverage.xml
+    paths:
+      - frontend/coverage/
+    expire_in: 1 week
+  coverage: '/Lines \s*: \s*(\d+\.\d+)%/'
+  cache:
+    paths:
+      - frontend/node_modules/
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ================================
+# SECURITY STAGE
+# ================================
+
+security-backend:
+  stage: security
+  image: owasp/dependency-check:latest
+  script:
+    - cd backend
+    - /usr/share/dependency-check/bin/dependency-check.sh --project "Backend" --scan . --format ALL --out dependency-check-report
+  artifacts:
+    paths:
+      - backend/dependency-check-report/
+    expire_in: 1 week
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+security-frontend:
+  stage: security
+  image: node:18-alpine
+  script:
+    - cd frontend
+    - npm ci
+    - npm audit --audit-level moderate
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ================================
+# TERRAFORM PLAN STAGE
+# ================================
+
+terraform-plan:
+  stage: terraform-plan
+  image: hashicorp/terraform:1.6
+  script:
+    - cd $TF_ROOT
+    - terraform init
+    - terraform plan -out=tfplan
+  artifacts:
+    paths:
+      - $TF_ROOT/tfplan
+      - $TF_ROOT/.terraform.lock.hcl
+    expire_in: 1 hour
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# ================================
+# TERRAFORM APPLY STAGE
+# ================================
+
+terraform-apply:
+  stage: terraform-apply
+  image: hashicorp/terraform:1.6
+  script:
+    - cd $TF_ROOT
+    - terraform init
+    - terraform apply -auto-approve tfplan
+  environment:
+    name: $CI_ENVIRONMENT_NAME
+    url: https://$CI_ENVIRONMENT_SLUG.example.com
+  dependencies:
+    - terraform-plan
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+    - if: $CI_COMMIT_TAG
+      when: manual
+
+# ================================
+# DEPLOY BACKEND STAGE
+# ================================
+
+deploy-backend:
+  stage: deploy-backend
+  image: amazon/aws-cli:latest
+  script:
+    - echo "Deploying backend to ECS Fargate..."
+    - aws ecs update-service 
+        --cluster fargate-springboot-angular-$CI_ENVIRONMENT_NAME-backend-cluster 
+        --service fargate-springboot-angular-$CI_ENVIRONMENT_NAME-backend-service 
+        --force-new-deployment
+    - echo "Waiting for deployment to complete..."
+    - aws ecs wait services-stable 
+        --cluster fargate-springboot-angular-$CI_ENVIRONMENT_NAME-backend-cluster 
+        --services fargate-springboot-angular-$CI_ENVIRONMENT_NAME-backend-service
+  environment:
+    name: $CI_ENVIRONMENT_NAME
+  dependencies:
+    - terraform-apply
+    - build-backend
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# ================================
+# DEPLOY FRONTEND STAGE
+# ================================
+
+deploy-frontend-fargate:
+  stage: deploy-frontend
+  image: amazon/aws-cli:latest
+  script:
+    - echo "Deploying frontend to ECS Fargate..."
+    - aws ecs update-service 
+        --cluster fargate-springboot-angular-$CI_ENVIRONMENT_NAME-frontend-cluster 
+        --service fargate-springboot-angular-$CI_ENVIRONMENT_NAME-frontend-service 
+        --force-new-deployment
+    - echo "Waiting for deployment to complete..."
+    - aws ecs wait services-stable 
+        --cluster fargate-springboot-angular-$CI_ENVIRONMENT_NAME-frontend-cluster 
+        --services fargate-springboot-angular-$CI_ENVIRONMENT_NAME-frontend-service
+  environment:
+    name: $CI_ENVIRONMENT_NAME
+  dependencies:
+    - terraform-apply
+    - build-frontend
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $FRONTEND_DEPLOYMENT_MODE == "fargate"
+    - if: $CI_COMMIT_TAG && $FRONTEND_DEPLOYMENT_MODE == "fargate"
+
+deploy-frontend-s3:
+  stage: deploy-frontend
+  image: amazon/aws-cli:latest
+  before_script:
+    - yum install -y tar gzip
+  script:
+    - echo "Deploying frontend to S3..."
+    - cd $TF_ROOT
+    
+    # Get S3 bucket name from Terraform output
+    - S3_BUCKET=$(terraform output -raw s3_bucket_name)
+    - CLOUDFRONT_DISTRIBUTION_ID=$(terraform output -raw cloudfront_distribution_id)
+    - echo "S3 Bucket: $S3_BUCKET"
+    - echo "CloudFront Distribution: $CLOUDFRONT_DISTRIBUTION_ID"
+    
+    # Extract build artifacts
+    - cd ../frontend
+    - tar -xzf frontend-build.tar.gz -C ./
+    
+    # Deploy to S3 with proper cache headers
+    - echo "Syncing files to S3..."
+    
+    # Upload HTML files with no-cache headers
+    - aws s3 sync . s3://$S3_BUCKET 
+        --exclude "*" 
+        --include "*.html" 
+        --cache-control "no-cache, no-store, must-revalidate" 
+        --metadata-directive REPLACE 
+        --delete
+    
+    # Upload CSS and JS files with long cache headers
+    - aws s3 sync . s3://$S3_BUCKET 
+        --exclude "*" 
+        --include "*.css" 
+        --include "*.js" 
+        --cache-control "public, max-age=31536000, immutable" 
+        --metadata-directive REPLACE
+    
+    # Upload other static assets
+    - aws s3 sync . s3://$S3_BUCKET 
+        --exclude "*.html" 
+        --exclude "*.css" 
+        --exclude "*.js" 
+        --cache-control "public, max-age=604800" 
+        --metadata-directive REPLACE
+    
+    # Invalidate CloudFront cache
+    - |
+      if [ "$CLOUDFRONT_DISTRIBUTION_ID" != "null" ] && [ -n "$CLOUDFRONT_DISTRIBUTION_ID" ]; then
+        echo "Creating CloudFront invalidation..."
+        INVALIDATION_ID=$(aws cloudfront create-invalidation \
+          --distribution-id $CLOUDFRONT_DISTRIBUTION_ID \
+          --paths "/*" \
+          --query 'Invalidation.Id' --output text)
+        
+        echo "Waiting for invalidation $INVALIDATION_ID to complete..."
+        aws cloudfront wait invalidation-completed \
+          --distribution-id $CLOUDFRONT_DISTRIBUTION_ID \
+          --id $INVALIDATION_ID
+      fi
+    
+    - echo "S3 deployment completed successfully!"
+  environment:
+    name: $CI_ENVIRONMENT_NAME
+  dependencies:
+    - terraform-apply
+    - build-frontend
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $FRONTEND_DEPLOYMENT_MODE == "s3"
+    - if: $CI_COMMIT_TAG && $FRONTEND_DEPLOYMENT_MODE == "s3"
+
+# ================================
+# POST-DEPLOY STAGE
+# ================================
+
+health-check:
+  stage: post-deploy
+  image: curlimages/curl:latest
+  script:
+    - echo "Performing health checks..."
+    - sleep 30  # Wait for services to start
+    
+    # Get ALB DNS name from Terraform output
+    - ALB_DNS=$(aws elbv2 describe-load-balancers --names fargate-springboot-angular-$CI_ENVIRONMENT_NAME-alb --query 'LoadBalancers[0].DNSName' --output text)
+    - echo "ALB DNS: $ALB_DNS"
+    
+    # Health check backend
+    - echo "Checking backend health..."
+    - curl -f -s --retry 3 --retry-delay 10 https://$ALB_DNS/api/users/health || exit 1
+    
+    # Health check frontend based on deployment mode
+    - |
+      if [ "$FRONTEND_DEPLOYMENT_MODE" = "s3" ]; then
+        # Get frontend URL from Terraform output
+        FRONTEND_URL=$(terraform output -raw frontend_url | sed 's|http://|https://|')
+        echo "Checking S3 frontend health at: $FRONTEND_URL"
+        curl -f -s --retry 3 --retry-delay 10 $FRONTEND_URL || exit 1
+      else
+        echo "Checking Fargate frontend health..."
+        curl -f -s --retry 3 --retry-delay 10 https://$ALB_DNS/health || exit 1
+      fi
+    
+    - echo "All health checks passed!"
+  environment:
+    name: $CI_ENVIRONMENT_NAME
+  dependencies:
+    - deploy-backend
+    - deploy-frontend-fargate
+    - deploy-frontend-s3
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+performance-test:
+  stage: post-deploy
+  image: alpine:latest
+  script:
+    - apk add --no-cache curl
+    - echo "Running basic performance tests..."
+    - ALB_DNS=$(aws elbv2 describe-load-balancers --names fargate-springboot-angular-$CI_ENVIRONMENT_NAME-alb --query 'LoadBalancers[0].DNSName' --output text)
+    
+    # Simple load test
+    - for i in {1..10}; do curl -s -o /dev/null -w "%{http_code} %{time_total}s\n" https://$ALB_DNS/api/users/health; done
+  environment:
+    name: $CI_ENVIRONMENT_NAME
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# ================================
+# ROLLBACK JOB (Manual)
+# ================================
+
+rollback:
+  stage: post-deploy
+  image: amazon/aws-cli:latest
+  script:
+    - echo "Rolling back to previous deployment..."
+    
+    # Rollback backend
+    - aws ecs update-service 
+        --cluster fargate-springboot-angular-$CI_ENVIRONMENT_NAME-backend-cluster 
+        --service fargate-springboot-angular-$CI_ENVIRONMENT_NAME-backend-service 
+        --task-definition fargate-springboot-angular-$CI_ENVIRONMENT_NAME-backend:ROLLBACK
+    
+    # Rollback frontend
+    - aws ecs update-service 
+        --cluster fargate-springboot-angular-$CI_ENVIRONMENT_NAME-frontend-cluster 
+        --service fargate-springboot-angular-$CI_ENVIRONMENT_NAME-frontend-service 
+        --task-definition fargate-springboot-angular-$CI_ENVIRONMENT_NAME-frontend:ROLLBACK
+        
+    - echo "Rollback completed!"
+  environment:
+    name: $CI_ENVIRONMENT_NAME
+  when: manual
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# ================================
+# GITLAB PAGES
+# ================================
+
+pages:
+  stage: pages
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache bash
+  script:
+    # Create public directory for GitLab Pages
+    - mkdir -p public
+    
+    # Copy all docs files to public directory
+    - cp -r docs/* public/
+    
+    # Copy root ARCHITECTURE.md to public with GitLab-specific header
+    - |
+      echo "# GitLab CI/CD + Terraform + AWS + Spring Boot + Angular - Architecture Documentation" > public/ARCHITECTURE.md
+      echo "" >> public/ARCHITECTURE.md
+      echo "> **📖 This is the GitLab Pages copy of the architecture documentation.**" >> public/ARCHITECTURE.md
+      echo "> **Master copy:** [\`/ARCHITECTURE.md\`](https://gitlab.com/cloudshare360/gitlab-ci-terraform-aws-fargate-springboot-angular-cloudfront-waf/-/blob/main/ARCHITECTURE.md) (repository root)" >> public/ARCHITECTURE.md
+      echo "> **Live docs:** [GitLab Pages](https://cloudshare360.gitlab.io/gitlab-ci-terraform-aws-fargate-springboot-angular-cloudfront-waf/)" >> public/ARCHITECTURE.md
+      echo "> **Repository:** [GitLab Repo](https://gitlab.com/cloudshare360/gitlab-ci-terraform-aws-fargate-springboot-angular-cloudfront-waf)" >> public/ARCHITECTURE.md
+      echo "" >> public/ARCHITECTURE.md
+      echo "---" >> public/ARCHITECTURE.md
+      echo "" >> public/ARCHITECTURE.md
+    
+    # Append the content from root ARCHITECTURE.md (skip first line)
+    - tail -n +2 ARCHITECTURE.md >> public/ARCHITECTURE.md
+    
+    # List files for debugging
+    - echo "Files in public directory:"
+    - ls -la public/
+    
+    # Ensure we have an index.html
+    - |
+      if [ ! -f public/index.html ]; then
+        echo "Creating basic index.html"
+        cat > public/index.html << 'EOF'
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Project Documentation</title>
+        <link rel="stylesheet" href="//unpkg.com/docsify/lib/themes/vue.css" />
+      </head>
+      <body>
+        <div id="app"></div>
+        <script>
+          window.$docsify = {
+            name: 'Project Documentation',
+            repo: 'https://gitlab.com/cloudshare360/gitlab-ci-terraform-aws-fargate-springboot-angular-cloudfront-waf',
+            loadSidebar: true,
+            subMaxLevel: 3,
+            auto2top: true
+          }
+        </script>
+        <script src="//unpkg.com/docsify/lib/docsify.min.js"></script>
+        <script src="//unpkg.com/docsify/lib/plugins/search.min.js"></script>
+        <script src="//unpkg.com/docsify/lib/plugins/emoji.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+        <script src="https://unpkg.com/docsify-mermaid/dist/docsify-mermaid.min.js"></script>
+      </body>
+      </html>
+      EOF
+      fi
+  artifacts:
+    paths:
+      - public
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

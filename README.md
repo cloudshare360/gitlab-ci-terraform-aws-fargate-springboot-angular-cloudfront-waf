@@ -17,14 +17,23 @@
 
 ---
 
-## 🔗 Live Documentation (GitHub Pages)
+## 🔗 Live Documentation (GitLab Pages)
 
-The project documentation is published to GitHub Pages with interactive navigation and mermaid diagrams:
+The project documentation can be published to GitLab Pages with interactive navigation and mermaid diagrams:
 
-- **📖 Live docs site:** https://cloudshare360.github.io/gitlab-ci-terraform-aws-fargate-springboot-angular-cloudfront-waf/
-- **📁 Repository:** https://github.com/cloudshare360/gitlab-ci-terraform-aws-fargate-springboot-angular-cloudfront-waf
+- **📖 Intended live docs site:** https://cloudshare360.gitlab.io/gitlab-ci-terraform-aws-fargate-springboot-angular-cloudfront-waf/
+- **📁 GitLab Repository:** https://gitlab.com/cloudshare360/gitlab-ci-terraform-aws-fargate-springboot-angular-cloudfront-waf
 
-> **💡 Tip:** Use the "Repository" link in the Pages header to switch between the rendered docs site and the GitHub repository view. The documentation is automatically synced from the root `ARCHITECTURE.md` file.
+> **💡 Setup Instructions:** To enable GitLab Pages:
+> 1. Push this repository to GitLab
+> 2. The GitLab CI/CD pipeline will automatically build and deploy the documentation site
+> 3. GitLab Pages will be available at the URL above once the pipeline completes
+> 
+> **Local Testing:** You can test the docs locally by running:
+> ```bash
+> cd docs && python3 -m http.server 8080
+> # Then open http://localhost:8080 in your browser
+> ```
 
 ---
 
