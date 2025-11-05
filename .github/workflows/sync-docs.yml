@@ -1,0 +1,60 @@
+name: Sync Documentation
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'ARCHITECTURE.md'
+      - 'docs/NAVIGATION.md'
+  workflow_dispatch:
+
+jobs:
+  sync-docs:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Sync ARCHITECTURE.md to docs/
+      run: |
+        # Copy root ARCHITECTURE.md to docs/ for GitHub Pages
+        cp ARCHITECTURE.md docs/ARCHITECTURE.md
+        
+        # Add a header note to the docs version
+        cat > temp_header.md << 'EOF'
+# GitLab CI/CD + Terraform + AWS + Spring Boot + Angular - Architecture Documentation
+
+> **📖 This is the GitHub Pages copy of the architecture documentation.**  
+> **Master copy:** [`/ARCHITECTURE.md`](../ARCHITECTURE.md) (repository root)  
+> **Live docs:** [GitHub Pages](https://cloudshare360.github.io/gitlab-ci-terraform-aws-fargate-springboot-angular-cloudfront-waf/)  
+> **Repository:** [GitHub Repo](https://github.com/cloudshare360/gitlab-ci-terraform-aws-fargate-springboot-angular-cloudfront-waf)
+
+---
+
+EOF
+        
+        # Remove the first line (title) from the copied file and prepend our header
+        tail -n +2 docs/ARCHITECTURE.md > temp_content.md
+        cat temp_header.md temp_content.md > docs/ARCHITECTURE.md
+        rm temp_header.md temp_content.md
+        
+    - name: Check for changes
+      id: verify-changed-files
+      run: |
+        if git diff --quiet; then
+          echo "changed=false" >> $GITHUB_OUTPUT
+        else
+          echo "changed=true" >> $GITHUB_OUTPUT
+        fi
+        
+    - name: Commit and push changes
+      if: steps.verify-changed-files.outputs.changed == 'true'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add docs/ARCHITECTURE.md
+        git commit -m "Auto-sync: Update docs/ARCHITECTURE.md from root file"
+        git push
